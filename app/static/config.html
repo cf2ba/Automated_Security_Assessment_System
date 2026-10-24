@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>系统配置 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container narrow">
+    <div class="page-head">
+      <h1>系统配置</h1>
+      <span class="sub">仅管理员可修改</span>
+    </div>
+    <div id="alert" class="alert"></div>
+
+    <form id="configForm">
+      <div class="card">
+        <h2>模型配置（OpenAI 兼容接口）</h2>
+        <div class="form-row">
+          <label>Base URL</label>
+          <input id="llm_base_url" placeholder="https://api.deepseek.com">
+        </div>
+        <div class="form-row inline">
+          <div>
+            <label>模型名称</label>
+            <input id="llm_model" placeholder="deepseek-chat">
+          </div>
+          <div>
+            <label>请求超时（秒）</label>
+            <input id="llm_timeout" type="number" min="10" max="1800">
+          </div>
+        </div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:8px">
+            <input id="llm_mock" type="checkbox" style="width:auto">
+            离线 mock 模式（不调用真实模型，仅用于链路自测）
+          </label>
+        </div>
+        <div class="small muted" id="keyState"></div>
+      </div>
+
+      <div class="card">
+        <h2>隔离环境配置</h2>
+        <div class="form-row inline">
+          <div>
+            <label>Docker 镜像</label>
+            <input id="docker_image" placeholder="assessment-runner:latest">
+          </div>
+          <div>
+            <label>目标应用端口</label>
+            <input id="isolation_target_port" type="number" min="1" max="65535">
+          </div>
+        </div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:8px">
+            <input id="isolation_required" type="checkbox" style="width:auto">
+            隔离环境不可用时终止评估（关闭则允许仅静态分析）
+          </label>
+          <label style="display:flex;align-items:center;gap:8px">
+            <input id="enable_dynamic_verify" type="checkbox" style="width:auto">
+            启用容器内动态验证（关闭则仅静态确认）
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>运行参数</h2>
+        <div class="grid cols-3">
+          <div class="form-row">
+            <label>默认超时时间（秒）</label>
+            <input id="default_timeout" type="number" min="60">
+          </div>
+          <div class="form-row">
+            <label>并发数</label>
+            <input id="max_concurrency" type="number" min="1" max="16">
+          </div>
+          <div class="form-row">
+            <label>数据保留天数</label>
+            <input id="retention_days" type="number" min="1">
+          </div>
+          <div class="form-row">
+            <label>资源采样间隔（秒）</label>
+            <input id="resource_sample_seconds" type="number" min="1" max="60">
+          </div>
+          <div class="form-row">
+            <label>单次上下文上限（字符）</label>
+            <input id="max_context_chars" type="number" min="1000">
+          </div>
+          <div class="form-row">
+            <label>最多读取文件数</label>
+            <input id="max_read_files" type="number" min="1">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>允许的本地源码根目录（多个用分号分隔，留空表示不限制）</label>
+          <input id="allowed_source_roots" placeholder="D:\code;E:\projects">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" id="saveBtn">保存配置</button>
+        <button type="button" class="secondary" id="reloadBtn">重新读取</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    const TEXT_FIELDS = ['llm_base_url', 'llm_model', 'docker_image', 'allowed_source_roots'];
+    const NUMBER_FIELDS = ['llm_timeout', 'isolation_target_port', 'default_timeout', 'max_concurrency',
+      'retention_days', 'resource_sample_seconds', 'max_context_chars', 'max_read_files'];
+    const BOOL_FIELDS = ['llm_mock', 'isolation_required', 'enable_dynamic_verify'];
+
+    async function load() {
+      hideAlert('alert');
+      try {
+        const cfg = await API.get('/api/system/config');
+        const values = cfg.values || {};
+        TEXT_FIELDS.forEach(key => {
+          const el = document.getElementById(key);
+          if (el) el.value = values[key] ?? '';
+        });
+        NUMBER_FIELDS.forEach(key => {
+          const el = document.getElementById(key);
+          if (el) el.value = values[key] ?? '';
+        });
+        BOOL_FIELDS.forEach(key => {
+          const el = document.getElementById(key);
+          if (el) el.checked = !!values[key];
+        });
+        document.getElementById('keyState').textContent = cfg.llm_api_key_configured
+          ? `API Key 已通过环境变量配置（${cfg.llm_api_key_masked}），修改请编辑 .env 后重启服务`
+          : 'API Key 未配置：请在 .env 中设置 LLM_API_KEY 后重启服务（页面不提供写入）';
+      } catch (e) {
+        showAlert('alert', e.message);
+      }
+    }
+
+    document.getElementById('configForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideAlert('alert');
+      const values = {};
+      TEXT_FIELDS.forEach(key => {
+        const el = document.getElementById(key);
+        if (el) values[key] = el.value.trim();
+      });
+      NUMBER_FIELDS.forEach(key => {
+        const el = document.getElementById(key);
+        if (el) values[key] = Number(el.value);
+      });
+      BOOL_FIELDS.forEach(key => {
+        const el = document.getElementById(key);
+        if (el) values[key] = el.checked;
+      });
+      const btn = document.getElementById('saveBtn');
+      btn.disabled = true;
+      try {
+        await API.put('/api/system/config', { values });
+        showAlert('alert', '配置已保存', 'success');
+        await load();
+      } catch (err) {
+        showAlert('alert', err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('reloadBtn').addEventListener('click', load);
+
+    (async () => {
+      const user = await requireLogin();
+      mountNav('config', user);
+      if (user.role !== 'admin') {
+        showAlert('alert', '仅管理员可访问系统配置');
+        document.getElementById('configForm').style.display = 'none';
+        return;
+      }
+      await load();
+    })();
+  </script>
+</body>
+</html>

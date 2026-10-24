@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>攻击路径 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container">
+    <div class="page-head">
+      <h1>攻击路径</h1>
+      <span class="spacer"></span>
+      <button class="secondary" id="refreshBtn">刷新</button>
+    </div>
+    <div id="alert" class="alert"></div>
+    <div id="paths"><div class="card"><div class="empty">加载中…</div></div></div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    const PID = currentProjectId();
+    let vulnMap = {};
+
+    async function load() {
+      try {
+        const [paths, vulns] = await Promise.all([
+          API.get(`/api/projects/${PID}/attack-paths`),
+          API.get(`/api/projects/${PID}/vulnerabilities?page_size=200`),
+        ]);
+        vulnMap = {};
+        (vulns.items || []).forEach(v => { vulnMap[v.id] = v; });
+        render(paths.items || []);
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    function render(paths) {
+      const el = document.getElementById('paths');
+      if (!paths.length) {
+        el.innerHTML = '<div class="card"><div class="empty">暂无攻击路径记录</div></div>';
+        return;
+      }
+      el.innerHTML = paths.map(p => `
+        <div class="card">
+          <div class="page-head" style="margin-bottom:10px">
+            <h2 style="margin:0">${esc(p.path_code)} · ${esc(p.path_title)}</h2>
+          </div>
+          <p>${esc(p.path_summary || '')}</p>
+          <h3>利用顺序</h3>
+          <table>
+            <thead><tr><th style="width:70px">步骤</th><th>说明</th><th>关联漏洞</th></tr></thead>
+            <tbody>
+              ${(p.items || []).map(item => {
+                const v = vulnMap[item.vuln_id];
+                const code = item.vuln_code || (v ? v.vuln_code : '');
+                const title = item.vuln_title || (v ? v.vuln_title : '');
+                const risk = v ? riskBadge(v.risk_level) : '';
+                return `<tr>
+                  <td class="num">${item.step_order}</td>
+                  <td>${esc(item.step_text || '-')}</td>
+                  <td>${code ? `${risk} <a href="/vulnerabilities.html?project_id=${PID}#v${item.vuln_id}">${esc(code)} ${esc(title)}</a>` : '<span class="muted">-</span>'}</td>
+                </tr>`;
+              }).join('') || '<tr><td colspan="3" class="empty">无步骤</td></tr>'}
+            </tbody>
+          </table>
+          <h3>最终影响</h3>
+          <p>${esc(p.final_impact_text || '-')}</p>
+        </div>
+      `).join('');
+    }
+
+    (async () => {
+      const user = await requireLogin();
+      mountNav('attack-paths', user);
+      document.getElementById('refreshBtn').addEventListener('click', load);
+      await load();
+      setInterval(load, 8000);
+    })();
+  </script>
+</body>
+</html>

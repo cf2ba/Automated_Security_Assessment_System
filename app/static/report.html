@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安全评估报告 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container">
+    <div class="page-head">
+      <h1>安全评估报告</h1>
+      <span id="reportTime" class="sub"></span>
+      <span class="spacer"></span>
+      <button class="secondary" id="toggleMd">查看 Markdown</button>
+      <a class="btn" id="downloadBtn" href="#">下载报告</a>
+      <button class="secondary" id="refreshBtn">刷新</button>
+    </div>
+    <div id="alert" class="alert"></div>
+
+    <div class="card" id="reportCard">
+      <div class="empty">加载中…</div>
+    </div>
+
+    <div class="card" id="mdCard" style="display:none">
+      <h2>Markdown 原文</h2>
+      <div class="pre light" id="mdContent" style="max-height:70vh"></div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    const PID = currentProjectId();
+    let showingMd = false;
+
+    async function load() {
+      hideAlert('alert');
+      try {
+        const report = await API.get(`/api/projects/${PID}/report`);
+        document.getElementById('reportTime').textContent = '生成时间：' + fmtTime(report.created_at);
+        document.getElementById('downloadBtn').href = report.download_url || `/api/projects/${PID}/report/download`;
+        document.getElementById('downloadBtn').style.display = '';
+        document.getElementById('mdContent').textContent = report.report_markdown || '';
+        document.getElementById('reportCard').style.display = showingMd ? 'none' : '';
+        document.getElementById('mdCard').style.display = showingMd ? '' : 'none';
+
+        if (!showingMd) {
+          const card = document.getElementById('reportCard');
+          card.innerHTML = '';
+          const iframe = document.createElement('iframe');
+          iframe.setAttribute('sandbox', '');
+          iframe.style.cssText = 'width:100%;border:1px solid #e5e7eb;border-radius:8px;height:74vh;background:#fff';
+          iframe.srcdoc = report.report_html || `<pre>${esc(report.report_markdown)}</pre>`;
+          card.appendChild(iframe);
+        }
+      } catch (e) {
+        const msg = String(e.message);
+        document.getElementById('downloadBtn').style.display = 'none';
+        if (msg.includes('尚未生成') || msg.includes('不存在')) {
+          document.getElementById('reportCard').innerHTML =
+            '<div class="empty">报告尚未生成。请先启动评估任务，待“报告生成”阶段完成后刷新。</div>';
+        } else if (msg.includes('生成中') || msg.includes('生成失败')) {
+          document.getElementById('reportCard').innerHTML = `<div class="empty">${esc(msg)}</div>`;
+        } else {
+          showAlert('alert', msg);
+        }
+      }
+    }
+
+    document.getElementById('toggleMd').addEventListener('click', () => {
+      showingMd = !showingMd;
+      document.getElementById('toggleMd').textContent = showingMd ? '查看报告预览' : '查看 Markdown';
+      load();
+    });
+    document.getElementById('refreshBtn').addEventListener('click', load);
+
+    (async () => {
+      const user = await requireLogin();
+      mountNav('report', user);
+      await load();
+    })();
+  </script>
+</body>
+</html>

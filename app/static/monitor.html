@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>实时监控 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container">
+    <div class="page-head">
+      <h1>实时监控</h1>
+      <span id="projectStatus"></span>
+      <span class="spacer"></span>
+      <span id="wsState" class="badge gray">连接中…</span>
+      <a class="btn secondary" id="detailLink">项目详情</a>
+    </div>
+    <div id="alert" class="alert"></div>
+
+    <div class="grid cols-4" style="margin-bottom:18px">
+      <div class="stat"><div class="label">当前阶段</div><div class="value" id="curStage">-</div></div>
+      <div class="stat"><div class="label">运行中角色</div><div class="value" id="activeWorkers">0</div></div>
+      <div class="stat"><div class="label">CPU / 内存</div><div class="value" id="cpuMem">-</div></div>
+      <div class="stat"><div class="label">累计 Token</div><div class="value" id="tokens">0</div></div>
+    </div>
+
+    <div class="card">
+      <h2>阶段推进</h2>
+      <div class="stage-steps" id="stageSteps"></div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h2>角色执行状态</h2>
+        <div id="workerList"><span class="muted small">暂无记录</span></div>
+      </div>
+      <div class="card">
+        <h2>新发现漏洞</h2>
+        <div id="vulnFeed"><span class="muted small">暂无</span></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h2>聊天消息</h2>
+        <div class="chat-list" id="chatList"><div class="empty">暂无消息</div></div>
+      </div>
+      <div class="card">
+        <h2>运行日志</h2>
+        <div class="pre light" id="logList" style="max-height:420px">等待日志…</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>资源消耗（最近 60 次采样）</h2>
+      <div class="spark" id="spark"></div>
+      <div class="small muted" id="sparkHint" style="margin-top:6px">蓝柱为 CPU 使用率</div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    const PID = currentProjectId();
+    const STAGE_ORDER = ['environment_scan', 'code_analysis', 'vulnerability_verify', 'report_generate', 'done'];
+    const stageStatus = {};
+    const workers = new Map();
+    const resources = [];
+    let logAtBottom = true;
+    let ws = null;
+    let reconnectTimer = null;
+    let lastSeq = 0;
+    let lastLogId = 0;
+    let lastResourceId = 0;
+    let lastResourceAt = '';
+    let connecting = false;
+    const seenLogs = new Set();
+    const seenChats = new Set();
+
+    function stageKey(name) { return name; }
+
+    function renderStages() {
+      document.getElementById('stageSteps').innerHTML = STAGE_ORDER.map(name => {
+        const status = stageStatus[name] || 'pending';
+        return `<div class="stage-step ${status}">
+          <div class="name">${stageLabel(name)}</div>
+          <div class="st">${statusLabel(status)}</div>
+        </div>`;
+      }).join('');
+    }
+
+    function renderWorkers() {
+      const el = document.getElementById('workerList');
+      if (!workers.size) {
+        el.innerHTML = '<span class="muted small">暂无记录</span>';
+        return;
+      }
+      const rows = [...workers.values()].sort((a, b) => b.id - a.id);
+      el.innerHTML = rows.map(w => `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9">
+          <span class="badge ${w.task_status === 'success' ? 'green' : w.task_status === 'failed' ? 'red' : w.task_status === 'running' ? 'blue' : 'gray'}">${statusLabel(w.task_status)}</span>
+          <span>${esc(roleLabel(w.worker_role))}</span>
+          <span class="small muted">${esc(w.task_content || '')}</span>
+        </div>
+      `).join('');
+      document.getElementById('activeWorkers').textContent =
+        [...workers.values()].filter(w => w.task_status === 'running').length;
+    }
+
+    function addChat(msg) {
+      if (msg.id) {
+        if (seenChats.has(msg.id)) return;
+        seenChats.add(msg.id);
+      }
+      const list = document.getElementById('chatList');
+      if (list.querySelector('.empty')) list.innerHTML = '';
+      const div = document.createElement('div');
+      div.className = `chat-item ${msg.message_type || ''}`;
+      div.innerHTML = `<div class="who">${esc(roleLabel(msg.worker_role))} · ${fmtTime(msg.created_at || new Date().toISOString())}</div>
+        <div>${esc(msg.message_text)}</div>`;
+      list.appendChild(div);
+      list.scrollTop = list.scrollHeight;
+    }
+
+    function addLog(log) {
+      if (log.id) {
+        if (seenLogs.has(log.id)) return;
+        seenLogs.add(log.id);
+        lastLogId = Math.max(lastLogId, log.id);
+      }
+      const el = document.getElementById('logList');
+      if (el.textContent.startsWith('等待日志')) el.textContent = '';
+      const div = document.createElement('div');
+      div.className = `log-line ${log.log_level || ''}`;
+      div.innerHTML = `<span class="ts">${fmtTime(log.created_at || new Date().toISOString()).slice(11)}</span>${esc(log.log_content)}`;
+      el.appendChild(div);
+      while (el.children.length > 500) el.removeChild(el.firstChild);
+      if (logAtBottom) el.scrollTop = el.scrollHeight;
+    }
+
+    function applySnapshot(snapshot) {
+      if (snapshot.project) {
+        document.querySelector('.page-head h1').textContent = `实时监控 · ${snapshot.project.project_name}`;
+        document.getElementById('projectStatus').innerHTML = statusBadge(snapshot.project.project_status);
+        document.getElementById('detailLink').href = `/project.html?project_id=${PID}`;
+      }
+      Object.keys(stageStatus).forEach(k => delete stageStatus[k]);
+      (snapshot.stages || []).forEach(s => { stageStatus[s.stage_name] = s.stage_status; });
+      const running = (snapshot.stages || []).filter(s => s.stage_status === 'running').pop();
+      document.getElementById('curStage').textContent = running ? stageLabel(running.stage_name) : '-';
+      renderStages();
+      workers.clear();
+      (snapshot.workers || []).forEach(w => workers.set(w.id, w));
+      renderWorkers();
+      if (snapshot.latest_resources) addResource(snapshot.latest_resources);
+      if (snapshot.last_seq !== undefined) lastSeq = snapshot.last_seq;
+    }
+
+    document.getElementById('logList').addEventListener('scroll', (e) => {
+      const el = e.target;
+      logAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    });
+
+    function addVuln(v) {
+      const feed = document.getElementById('vulnFeed');
+      if (feed.querySelector('.muted')) feed.innerHTML = '';
+      const div = document.createElement('div');
+      div.style.padding = '6px 0';
+      div.style.borderBottom = '1px solid #f1f5f9';
+      div.innerHTML = `${riskBadge(v.risk_level)} <a href="/vulnerabilities.html?project_id=${PID}">${esc(v.vuln_title)}</a>`;
+      feed.prepend(div);
+    }
+
+    function addResource(r) {
+      if (!r) return;
+      document.getElementById('cpuMem').textContent = `${r.cpu_usage}% / ${r.memory_usage}%`;
+      document.getElementById('tokens').textContent = r.token_count;
+      if (r.id && r.id <= lastResourceId) return;
+      if (r.id) lastResourceId = r.id;
+      if (r.recorded_at) {
+        if (r.recorded_at <= lastResourceAt) return;
+        lastResourceAt = r.recorded_at;
+      }
+      resources.push(r);
+      while (resources.length > 60) resources.shift();
+      renderSpark();
+    }
+
+    function renderSpark() {
+      const max = Math.max(10, ...resources.map(r => r.cpu_usage || 0));
+      document.getElementById('spark').innerHTML = resources.map(r => {
+        const h = Math.max(2, Math.round((r.cpu_usage || 0) / max * 46));
+        return `<span style="height:${h}px" title="CPU ${r.cpu_usage}% · 内存 ${r.memory_usage}%"></span>`;
+      }).join('');
+    }
+
+    function handleEvent(evt) {
+      if (evt.seq) lastSeq = Math.max(lastSeq, evt.seq);
+      switch (evt.type) {
+        case 'snapshot':
+          if (evt.reset) {
+            document.getElementById('logList').textContent = '';
+            document.getElementById('chatList').innerHTML = '<div class="empty">暂无消息</div>';
+            document.getElementById('vulnFeed').innerHTML = '<span class="muted small">暂无</span>';
+            resources.length = 0;
+            lastResourceId = 0;
+            lastResourceAt = '';
+            seenLogs.clear();
+            seenChats.clear();
+            loadInitial();
+          }
+          applySnapshot(evt);
+          break;
+        case 'connected':
+          if (evt.last_seq) lastSeq = Math.max(lastSeq, evt.last_seq);
+          break;
+        case 'heartbeat': break;
+        case 'project_status':
+          document.getElementById('projectStatus').innerHTML = statusBadge(evt.project_status);
+          if (evt.project_status === 'running') document.getElementById('wsState').className = 'badge blue';
+          break;
+        case 'stage_status':
+          stageStatus[stageKey(evt.stage_name)] = evt.stage_status;
+          if (evt.stage_status === 'running') document.getElementById('curStage').textContent = stageLabel(evt.stage_name);
+          renderStages();
+          break;
+        case 'worker_status': {
+          const cur = workers.get(evt.worker_task_id) || { id: evt.worker_task_id };
+          cur.worker_role = evt.worker_role;
+          cur.task_status = evt.task_status;
+          workers.set(evt.worker_task_id, cur);
+          renderWorkers();
+          break;
+        }
+        case 'chat_message': addChat(evt); break;
+        case 'runtime_log': addLog(evt); break;
+        case 'resource_usage': addResource(evt); break;
+        case 'vulnerability_found': addVuln(evt); break;
+        case 'report_ready':
+          showAlert('alert', `报告已生成（#${evt.report_id}）`, 'success');
+          break;
+      }
+    }
+
+    function connect() {
+      if (connecting) return;
+      connecting = true;
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const suffix = lastSeq > 0 ? `?after_seq=${lastSeq}` : '';
+      ws = new WebSocket(`${proto}://${location.host}/api/projects/${PID}/stream${suffix}`);
+      ws.onopen = () => {
+        connecting = false;
+        document.getElementById('wsState').className = 'badge green';
+        document.getElementById('wsState').textContent = '已连接';
+      };
+      ws.onmessage = (e) => {
+        try { handleEvent(JSON.parse(e.data)); } catch (err) { console.warn(err); }
+      };
+      ws.onclose = (e) => {
+        connecting = false;
+        if (e.code === 4401) {
+          location.href = '/index.html';
+          return;
+        }
+        if (e.code === 4404) {
+          document.getElementById('wsState').className = 'badge red';
+          document.getElementById('wsState').textContent = '项目不存在';
+          return;
+        }
+        document.getElementById('wsState').className = 'badge orange';
+        document.getElementById('wsState').textContent = '重连中…';
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+      ws.onerror = () => ws.close();
+    }
+
+    async function loadInitial() {
+      try {
+        const [project, stages, workersData, logs, messages, res] = await Promise.all([
+          API.get(`/api/projects/${PID}`),
+          API.get(`/api/projects/${PID}/stages`),
+          API.get(`/api/projects/${PID}/workers`),
+          API.get(`/api/projects/${PID}/logs?limit=400`),
+          API.get(`/api/projects/${PID}/messages`),
+          API.get(`/api/projects/${PID}/resources?limit=60`),
+        ]);
+        document.querySelector('.page-head h1').textContent = `实时监控 · ${project.project_name}`;
+        document.getElementById('projectStatus').innerHTML = statusBadge(project.project_status);
+        document.getElementById('detailLink').href = `/project.html?project_id=${PID}`;
+
+        (stages.items || []).forEach(s => { stageStatus[s.stage_name] = s.stage_status; });
+        const running = (stages.items || []).filter(s => s.stage_status === 'running').pop();
+        document.getElementById('curStage').textContent = running ? stageLabel(running.stage_name) : '-';
+        renderStages();
+
+        workers.clear();
+        (workersData.items || []).forEach(w => workers.set(w.id, w));
+        renderWorkers();
+
+        (logs.items || []).forEach(addLog);
+        if (logs.last_id) lastLogId = Math.max(lastLogId, logs.last_id);
+        (messages.items || []).forEach(addChat);
+        (res.items || []).forEach(r => {
+          resources.push(r);
+          if (r.id) lastResourceId = Math.max(lastResourceId, r.id);
+          if (r.recorded_at) lastResourceAt = r.recorded_at;
+          if (r.token_count) document.getElementById('tokens').textContent = r.token_count;
+        });
+        if (resources.length) addResource(resources[resources.length - 1]);
+        renderSpark();
+      } catch (e) {
+        showAlert('alert', e.message);
+      }
+    }
+
+    async function pollFallback() {
+      if (ws && ws.readyState === WebSocket.OPEN) return;
+      try {
+        const [project, stages, logs] = await Promise.all([
+          API.get(`/api/projects/${PID}`),
+          API.get(`/api/projects/${PID}/stages`),
+          API.get(`/api/projects/${PID}/logs?limit=200&after_id=${lastLogId}`),
+        ]);
+        document.querySelector('.page-head h1').textContent = `实时监控 · ${project.project_name}`;
+        document.getElementById('projectStatus').innerHTML = statusBadge(project.project_status);
+        Object.keys(stageStatus).forEach(k => delete stageStatus[k]);
+        (stages.items || []).forEach(s => { stageStatus[s.stage_name] = s.stage_status; });
+        const running = (stages.items || []).filter(s => s.stage_status === 'running').pop();
+        document.getElementById('curStage').textContent = running ? stageLabel(running.stage_name) : '-';
+        renderStages();
+        (logs.items || []).forEach(addLog);
+      } catch (e) { /* 轮询失败时等待重连 */ }
+    }
+
+    (async () => {
+      const user = await requireLogin();
+      mountNav('monitor', user);
+      await loadInitial();
+      connect();
+      setInterval(pollFallback, 5000);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>漏洞列表 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container">
+    <div class="page-head">
+      <h1>漏洞列表</h1>
+      <span class="spacer"></span>
+      <select id="riskFilter" style="width:auto">
+        <option value="">全部风险等级</option>
+        <option value="critical">严重</option>
+        <option value="high">高危</option>
+        <option value="medium">中危</option>
+        <option value="low">低危</option>
+      </select>
+      <select id="verifyFilter" style="width:auto">
+        <option value="">全部验证状态</option>
+        <option value="verified">已验证</option>
+        <option value="statically_confirmed">静态确认</option>
+        <option value="unverified">未验证</option>
+      </select>
+      <button class="secondary" id="refreshBtn">刷新</button>
+    </div>
+    <div id="alert" class="alert"></div>
+
+    <div class="card">
+      <table>
+        <thead><tr><th>编号</th><th>漏洞标题</th><th>风险等级</th><th>验证状态</th><th>文件位置</th><th>操作</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      </table>
+      <div class="actions" style="margin-top:14px;align-items:center">
+        <button class="secondary small" id="prevBtn">上一页</button>
+        <span class="small muted" id="pageInfo">-</span>
+        <button class="secondary small" id="nextBtn">下一页</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="detailModal" onclick="modalBackdropClick(event, 'detailModal')">
+    <div class="modal wide">
+      <h2 id="mTitle">漏洞详情</h2>
+      <div id="mBody"></div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeModal('detailModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    const PID = currentProjectId();
+    const PAGE_SIZE = 20;
+    let page = 1;
+    let total = 0;
+
+    async function load() {
+      const params = new URLSearchParams({ page, page_size: PAGE_SIZE });
+      const risk = document.getElementById('riskFilter').value;
+      const verify = document.getElementById('verifyFilter').value;
+      if (risk) params.set('risk_level', risk);
+      if (verify) params.set('verify_status', verify);
+      try {
+        const data = await API.get(`/api/projects/${PID}/vulnerabilities?${params}`);
+        total = data.total || 0;
+        render(data.items || []);
+        renderPager();
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    function renderPager() {
+      const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      if (page > pages) { page = pages; return load(); }
+      document.getElementById('pageInfo').textContent = `第 ${page} / ${pages} 页 · 共 ${total} 条`;
+      document.getElementById('prevBtn').disabled = page <= 1;
+      document.getElementById('nextBtn').disabled = page >= pages;
+    }
+
+    function render(items) {
+      const tbody = document.getElementById('rows');
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无漏洞记录</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(v => `
+        <tr>
+          <td class="mono">${esc(v.vuln_code)}</td>
+          <td>${esc(v.vuln_title)}</td>
+          <td>${riskBadge(v.risk_level)}</td>
+          <td>${statusBadge(v.verify_status)}</td>
+          <td class="small mono">${esc(v.file_path || '-')}${v.line_number ? ':' + v.line_number : ''}</td>
+          <td><button class="secondary small" onclick="showDetail(${v.id})">详情</button></td>
+        </tr>
+      `).join('');
+    }
+
+    async function showDetail(id) {
+      try {
+        const v = await API.get(`/api/projects/${PID}/vulnerabilities/${id}`);
+        document.getElementById('mTitle').innerHTML =
+          `${esc(v.vuln_code)} · ${esc(v.vuln_title)} ${riskBadge(v.risk_level)} ${statusBadge(v.verify_status)}`;
+        const block = (title, text) =>
+          `<div class="detail-block"><h4>${title}</h4><div class="pre light">${esc(text || '（无）')}</div></div>`;
+        document.getElementById('mBody').innerHTML = `
+          <p class="small muted">位置：<span class="mono">${esc(v.file_path || '-')}${v.line_number ? ':' + v.line_number : ''}</span></p>
+          ${block('影响说明', v.impact_text)}
+          ${block('触发条件', v.condition_text)}
+          ${block('证据内容', v.evidence_text)}
+          ${block('复现步骤', v.reproduce_steps_text)}
+          ${block('验证代码', v.verify_code_text)}
+          ${block('修复建议', v.recommendation_text)}
+        `;
+        openModal('detailModal');
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    (async () => {
+      const user = await requireLogin();
+      mountNav('vulnerabilities', user);
+      document.getElementById('riskFilter').addEventListener('change', () => { page = 1; load(); });
+      document.getElementById('verifyFilter').addEventListener('change', () => { page = 1; load(); });
+      document.getElementById('refreshBtn').addEventListener('click', load);
+      document.getElementById('prevBtn').addEventListener('click', () => { if (page > 1) { page--; load(); } });
+      document.getElementById('nextBtn').addEventListener('click', () => { page++; load(); });
+      await load();
+      setInterval(load, 6000);
+    })();
+  </script>
+</body>
+</html>

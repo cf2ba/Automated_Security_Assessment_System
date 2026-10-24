@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <h1>自动化安全评估系统</h1>
+      <div class="sub" id="subtitle">请登录以继续</div>
+      <div id="alert" class="alert"></div>
+
+      <form id="loginForm">
+        <div class="form-row">
+          <label for="loginUser">用户名</label>
+          <input id="loginUser" autocomplete="username" required>
+        </div>
+        <div class="form-row">
+          <label for="loginPass">密码</label>
+          <input id="loginPass" type="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" id="loginBtn">登录</button>
+      </form>
+
+      <form id="initForm" style="display:none">
+        <div class="form-row">
+          <label for="initUser">管理员用户名</label>
+          <input id="initUser" autocomplete="username" required>
+        </div>
+        <div class="form-row">
+          <label for="initPass">管理员密码（至少 8 位）</label>
+          <input id="initPass" type="password" autocomplete="new-password" required minlength="8">
+        </div>
+        <div class="form-row">
+          <label for="initPass2">确认密码</label>
+          <input id="initPass2" type="password" autocomplete="new-password" required minlength="8">
+        </div>
+        <button type="submit" id="initBtn">初始化管理员</button>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    async function bootstrap() {
+      try {
+        const st = await API.get('/api/system/status');
+        if (!st.initialized) {
+          document.getElementById('subtitle').textContent = '系统尚未初始化，请先创建管理员账户';
+          document.getElementById('loginForm').style.display = 'none';
+          document.getElementById('initForm').style.display = 'block';
+        }
+      } catch (e) {
+        showAlert('alert', '无法连接后端服务：' + e.message);
+      }
+    }
+
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideAlert('alert');
+      const btn = document.getElementById('loginBtn');
+      btn.disabled = true;
+      try {
+        await API.post('/api/system/login', {
+          username: document.getElementById('loginUser').value.trim(),
+          password: document.getElementById('loginPass').value,
+        });
+        location.href = '/projects.html';
+      } catch (err) {
+        showAlert('alert', err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('initForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideAlert('alert');
+      const username = document.getElementById('initUser').value.trim();
+      const password = document.getElementById('initPass').value;
+      const password2 = document.getElementById('initPass2').value;
+      if (password !== password2) {
+        showAlert('alert', '两次输入的密码不一致');
+        return;
+      }
+      const btn = document.getElementById('initBtn');
+      btn.disabled = true;
+      try {
+        await API.post('/api/system/init', { username, password });
+        await API.post('/api/system/login', { username, password });
+        location.href = '/projects.html';
+      } catch (err) {
+        showAlert('alert', err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    bootstrap();
+  </script>
+</body>
+</html>

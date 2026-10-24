@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>项目列表 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container">
+    <div class="page-head">
+      <h1>项目列表</h1>
+      <span class="spacer"></span>
+      <button id="newBtn">＋ 新建项目</button>
+    </div>
+    <div id="alert" class="alert"></div>
+
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>项目名称</th><th>源码来源</th><th>状态</th>
+            <th>最近启动时间</th><th>最近完成时间</th><th>漏洞数</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="projectRows">
+          <tr><td colspan="8" class="empty">加载中…</td></tr>
+        </tbody>
+      </table>
+      <div class="actions" style="margin-top:14px;align-items:center">
+        <button class="secondary small" id="prevBtn">上一页</button>
+        <span class="small muted" id="pageInfo">-</span>
+        <button class="secondary small" id="nextBtn">下一页</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="createModal" onclick="modalBackdropClick(event, 'createModal')">
+    <div class="modal">
+      <h2>新建评估项目</h2>
+      <div id="modalAlert" class="alert"></div>
+      <form id="createForm">
+        <div class="form-row">
+          <label>项目名称</label>
+          <input id="fName" required maxlength="128" placeholder="例如：示例漏洞应用">
+        </div>
+        <div class="form-row inline">
+          <div>
+            <label>源码来源类型</label>
+            <select id="fType">
+              <option value="local">本地目录</option>
+              <option value="git">Git 仓库地址</option>
+            </select>
+          </div>
+          <div>
+            <label>隔离环境类型</label>
+            <select id="fIsolation">
+              <option value="docker">Docker 容器</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <label id="fPathLabel">源码路径（绝对路径）</label>
+          <input id="fPath" required placeholder="例如：C:\path\to\example_project">
+        </div>
+        <div class="form-row">
+          <label>任务说明</label>
+          <textarea id="fTask" placeholder="描述本次评估关注点，例如：重点检查 Web 入口与数据库访问"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="secondary" onclick="closeModal('createModal')">取消</button>
+          <button type="submit" id="createBtn">创建项目</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    let USER = null;
+    let projects = [];
+    const PAGE_SIZE = 20;
+    let page = 1;
+    let total = 0;
+
+    async function load() {
+      try {
+        const data = await API.get(`/api/projects?page=${page}&page_size=${PAGE_SIZE}`);
+        projects = data.items || [];
+        total = data.total || 0;
+        render();
+        renderPager();
+      } catch (e) {
+        showAlert('alert', e.message);
+      }
+    }
+
+    function renderPager() {
+      const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      if (page > pages) { page = pages; return load(); }
+      document.getElementById('pageInfo').textContent = `第 ${page} / ${pages} 页 · 共 ${total} 个项目`;
+      document.getElementById('prevBtn').disabled = page <= 1;
+      document.getElementById('nextBtn').disabled = page >= pages;
+    }
+
+    function render() {
+      const tbody = document.getElementById('projectRows');
+      if (!projects.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无项目，点击右上角“新建项目”开始</td></tr>';
+        return;
+      }
+      tbody.innerHTML = projects.map(p => `
+        <tr>
+          <td class="num">${p.id}</td>
+          <td><a href="/project.html?project_id=${p.id}">${esc(p.project_name)}</a></td>
+          <td><span class="badge ${p.source_type === 'git' ? 'purple' : 'gray'}">${p.source_type === 'git' ? 'Git' : '本地'}</span>
+              <div class="small muted mono">${esc(p.source_path)}</div></td>
+          <td>${statusBadge(p.project_status)}</td>
+          <td class="small">${fmtTime(p.last_started_at)}</td>
+          <td class="small">${fmtTime(p.last_finished_at)}</td>
+          <td class="num">${p.vulnerability_count || 0}</td>
+          <td>
+            <div class="actions">
+              <button class="secondary small" onclick="go(${p.id})">详情</button>
+              <button class="small" onclick="startProject(${p.id})" ${p.project_status === 'running' ? 'disabled' : ''}>启动</button>
+              <button class="secondary small" onclick="stopProject(${p.id})" ${p.project_status === 'running' ? '' : 'disabled'}>停止</button>
+              <button class="danger small" onclick="removeProject(${p.id})">删除</button>
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function go(id) { location.href = `/project.html?project_id=${id}`; }
+
+    async function startProject(id) {
+      if (!confirm(`确认启动项目 #${id} 的评估任务？`)) return;
+      try {
+        await API.post(`/api/projects/${id}/start`);
+        location.href = `/monitor.html?project_id=${id}`;
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    async function stopProject(id) {
+      try {
+        await API.post(`/api/projects/${id}/stop`);
+        showAlert('alert', '已发送停止指令', 'success');
+        setTimeout(load, 800);
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    async function removeProject(id) {
+      if (!confirm(`删除项目 #${id} 将同时删除其漏洞、攻击路径、日志、报告等全部数据，确认继续？`)) return;
+      try {
+        await API.del(`/api/projects/${id}`);
+        showAlert('alert', '项目已删除', 'success');
+        load();
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    document.getElementById('newBtn').addEventListener('click', () => {
+      hideAlert('modalAlert');
+      openModal('createModal');
+    });
+
+    document.getElementById('prevBtn').addEventListener('click', () => {
+      if (page > 1) { page -= 1; load(); }
+    });
+    document.getElementById('nextBtn').addEventListener('click', () => {
+      page += 1;
+      load();
+    });
+
+    document.getElementById('fType').addEventListener('change', (e) => {
+      const isGit = e.target.value === 'git';
+      document.getElementById('fPathLabel').textContent = isGit ? 'Git 仓库地址' : '源码路径（绝对路径）';
+      document.getElementById('fPath').placeholder = isGit ? '例如：https://github.com/xxx/yyy.git' : '例如：C:\\path\\to\\example_project';
+    });
+
+    document.getElementById('createForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideAlert('modalAlert');
+      const btn = document.getElementById('createBtn');
+      btn.disabled = true;
+      try {
+        const data = await API.post('/api/projects', {
+          project_name: document.getElementById('fName').value.trim(),
+          source_type: document.getElementById('fType').value,
+          source_path: document.getElementById('fPath').value.trim(),
+          task_content: document.getElementById('fTask').value,
+          isolation_type: document.getElementById('fIsolation').value,
+        });
+        closeModal('createModal');
+        location.href = `/project.html?project_id=${data.id}`;
+      } catch (err) {
+        showAlert('modalAlert', err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    (async () => {
+      USER = await requireLogin();
+      mountNav('projects', USER);
+      await load();
+      setInterval(load, 5000);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>项目详情 · 自动化安全评估系统</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav" id="nav"></nav>
+  <div class="container">
+    <div class="page-head">
+      <h1 id="title">项目详情</h1>
+      <span id="statusSlot"></span>
+      <span class="spacer"></span>
+      <div class="actions">
+        <button id="startBtn">启动评估</button>
+        <button class="secondary" id="stopBtn">停止</button>
+        <button class="secondary" id="monitorBtn">实时监控</button>
+        <button class="danger" id="deleteBtn">删除项目</button>
+      </div>
+    </div>
+    <div id="alert" class="alert"></div>
+
+    <div class="grid cols-4" style="margin-bottom:18px">
+      <div class="stat"><div class="label">漏洞数量</div><div class="value" id="vulnCount">0</div></div>
+      <div class="stat"><div class="label">攻击路径</div><div class="value" id="pathCount">0</div></div>
+      <div class="stat"><div class="label">报告状态</div><div class="value" id="reportState">未生成</div></div>
+      <div class="stat"><div class="label">隔离环境编号</div><div class="value small mono" id="envId">-</div></div>
+    </div>
+
+    <div class="card">
+      <h2>基本信息</h2>
+      <div class="grid cols-2">
+        <div><div class="muted small">源码来源</div><div id="source"></div></div>
+        <div><div class="muted small">任务说明</div><div id="task"></div></div>
+        <div><div class="muted small">创建时间</div><div id="created"></div></div>
+        <div><div class="muted small">更新时间</div><div id="updated"></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>阶段状态</h2>
+      <div class="stage-steps" id="stages"><span class="muted small">加载中…</span></div>
+    </div>
+
+    <div class="card">
+      <h2>角色执行记录</h2>
+      <table>
+        <thead><tr><th>角色</th><th>任务内容</th><th>状态</th><th>开始</th><th>结束</th><th>结果 / 错误</th></tr></thead>
+        <tbody id="workers"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>结果入口</h2>
+      <div class="link-row">
+        <a class="btn" id="linkVuln">查看漏洞列表</a>
+        <a class="btn secondary" id="linkPath">查看攻击路径</a>
+        <a class="btn secondary" id="linkReport">查看报告</a>
+        <a class="btn secondary" id="linkMonitor">实时监控</a>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
+  <script>
+    const PID = currentProjectId();
+    let USER = null;
+
+    const STAGE_ORDER = ['environment_scan', 'code_analysis', 'vulnerability_verify', 'report_generate', 'done'];
+
+    async function load() {
+      try {
+        const [project, stages, workers] = await Promise.all([
+          API.get(`/api/projects/${PID}`),
+          API.get(`/api/projects/${PID}/stages`),
+          API.get(`/api/projects/${PID}/workers`),
+        ]);
+        renderProject(project);
+        renderStages(stages.items || []);
+        renderWorkers(workers.items || []);
+      } catch (e) {
+        showAlert('alert', e.message);
+      }
+    }
+
+    function renderProject(p) {
+      document.getElementById('title').textContent = p.project_name;
+      document.getElementById('statusSlot').innerHTML = statusBadge(p.project_status);
+      const counts = p.counts || {};
+      document.getElementById('vulnCount').textContent = (counts.vulnerabilities || {}).total || 0;
+      document.getElementById('pathCount').textContent = counts.attack_paths || 0;
+      const reportStatus = p.report ? p.report.report_status : null;
+      document.getElementById('reportState').textContent = statusLabel(reportStatus || '未生成');
+      document.getElementById('envId').textContent = p.isolation_env_id || '-';
+      document.getElementById('source').innerHTML =
+        `<span class="badge ${p.source_type === 'git' ? 'purple' : 'gray'}">${p.source_type === 'git' ? 'Git' : '本地'}</span>
+         <span class="mono small">${esc(p.source_path)}</span>`;
+      document.getElementById('task').textContent = p.task_content || '-';
+      document.getElementById('created').textContent = fmtTime(p.created_at);
+      document.getElementById('updated').textContent = fmtTime(p.updated_at);
+
+      document.getElementById('startBtn').disabled = p.project_status === 'running';
+      document.getElementById('stopBtn').disabled = p.project_status !== 'running';
+      document.getElementById('startBtn').onclick = () => startProject();
+      document.getElementById('stopBtn').onclick = () => stopProject();
+      document.getElementById('deleteBtn').onclick = () => removeProject();
+    }
+
+    function renderStages(items) {
+      const latest = {};
+      items.forEach(s => { latest[s.stage_name] = s; });
+      document.getElementById('stages').innerHTML = STAGE_ORDER.map(name => {
+        const s = latest[name];
+        const status = s ? s.stage_status : 'pending';
+        return `<div class="stage-step ${status}">
+          <div class="name">${stageLabel(name)}</div>
+          <div class="st">${s ? statusLabel(status) + (s.error_message ? ' · ' + esc(s.error_message) : '') : '未开始'}</div>
+        </div>`;
+      }).join('');
+    }
+
+    function renderWorkers(items) {
+      const tbody = document.getElementById('workers');
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无角色执行记录</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.slice().reverse().map(w => `
+        <tr>
+          <td>${esc(roleLabel(w.worker_role))}<div class="small muted">#${w.id}</div></td>
+          <td class="small">${esc(w.task_content)}</td>
+          <td>${statusBadge(w.task_status)}</td>
+          <td class="small">${fmtTime(w.started_at)}</td>
+          <td class="small">${fmtTime(w.finished_at)}</td>
+          <td class="small">${esc(w.error_message || w.result_summary || '-')}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function startProject() {
+      if (!confirm('确认启动该项目的评估任务？')) return;
+      try {
+        await API.post(`/api/projects/${PID}/start`);
+        location.href = `/monitor.html?project_id=${PID}`;
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    async function stopProject() {
+      try {
+        await API.post(`/api/projects/${PID}/stop`);
+        showAlert('alert', '已发送停止指令', 'success');
+        setTimeout(load, 800);
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    async function removeProject() {
+      if (!confirm('删除项目将同时删除全部关联数据与文件，确认继续？')) return;
+      try {
+        await API.del(`/api/projects/${PID}`);
+        location.href = '/projects.html';
+      } catch (e) { showAlert('alert', e.message); }
+    }
+
+    (async () => {
+      USER = await requireLogin();
+      mountNav('projects', USER);
+      document.getElementById('monitorBtn').onclick = () => { location.href = `/monitor.html?project_id=${PID}`; };
+      document.getElementById('linkVuln').href = `/vulnerabilities.html?project_id=${PID}`;
+      document.getElementById('linkPath').href = `/attack-paths.html?project_id=${PID}`;
+      document.getElementById('linkReport').href = `/report.html?project_id=${PID}`;
+      document.getElementById('linkMonitor').href = `/monitor.html?project_id=${PID}`;
+      await load();
+      setInterval(load, 4000);
+    })();
+  </script>
+</body>
+</html>
